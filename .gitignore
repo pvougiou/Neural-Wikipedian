@@ -3,9 +3,5 @@ D2/
 KenLM/*.klm
 KenLM/*.arpa
 KenLM/templates/*
-Systems/Triples2LSTM/checkpoints/D1/*
-Systems/Triples2LSTM/checkpoints/D2/*
-Systems/Triples2GRU/checkpoints/D1/*
-Systems/Triples2GRU/checkpoints/D2/*
 .ipynb_checkpoints/
 .DS_Store
