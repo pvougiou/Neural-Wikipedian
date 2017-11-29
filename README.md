@@ -111,12 +111,7 @@ The table below presents the distribution of the 10 most common predicates, and 
     <td align="center">0.49</td>
   </tr>
   <tr>
-  <td></td>
-  <td></td>
-  <td></td>
-  <td></td>
-  <td></td>
-  <td></td>
+  <td colspan="6"></td>
   </tr>
   <thead>
     <tr>
