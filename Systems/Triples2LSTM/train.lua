@@ -90,9 +90,8 @@ local function create_encoder()
         nn.LookupTableMaskZero(params.source_vocab_size, params.rnn_size)(x))
 
     local n2i                   = nn.BatchNormalization(params.rnn_size, 1e-5, 0.1, true)
-
-    i[1]
-        = nn.ReLU()(n2i(nn.Linear(3 * params.rnn_size, params.rnn_size, false)(nn.Dropout(params.dropout)(i[0]))))
+    
+    i[1]                        = nn.ReLU()(n2i(nn.Linear(3 * params.rnn_size, params.rnn_size, false)(nn.Dropout(params.dropout)(i[0]))))
    for layeridx = 2, params.layers do
        i[layeridx] = nn.ReLU()(nn.BatchNormalization(params.rnn_size, 1e-5, 0.1, true)(
 				   nn.Linear(params.rnn_size, params.rnn_size, false)(
