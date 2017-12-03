@@ -11,10 +11,16 @@
 ----
 
 
-local beam_sampling_params = {checkpoint = './checkpoints/D1/surf_form_tuples.model.t7', -- The filepath to the saved pre-trained model.
-			      -- IMPORTANT: Make sure that the dataset that will be loaded matches the specification of the pre-trained model.
-			      dataset_path = '../../D1/processed/with-Surface-Form-Tuples/', -- The path to the folder with all the required dataset-related files.
-			      beam_size = 5 -- Sets the beam size that will be used during decoding.
+local beam_sampling_params = {
+    checkpoint = './checkpoints/D1/surf_form_tuples.model.t7', -- The filepath to the saved pre-trained model.
+    -- IMPORTANT: Make sure that the dataset that will be loaded matches the specification of the pre-trained model.
+    dataset_path = '../../D1/processed/with-Surface-Form-Tuples/', -- The path to the folder with all the required dataset-related files.
+    beam_size = 5, -- Sets the beam size that will be used during decoding.
+    -- IMPORTANT: A model that has been trained on a GPU should be loaded in a GPU; a model that has been trained
+    -- on the CPU should be loaded in the CPU. Use the variable below to set the ID of the GPU on which
+    -- you would like to load a model that has been training on a GPU.
+    -- In case the model has been trained using the CPU, please set beam_sampling_params.gpuidx to 0.
+    gpuidx = 1
 }
 
 
@@ -23,7 +29,7 @@ local ok1, cunn = pcall(require, 'cunn')
 local ok2, cutorch = pcall(require, 'cutorch')
 if not (ok1 and ok2) then
     print('Warning: Either cunn or cutorch was not found. Falling gracefully to CPU...')
-    params.gpuidx = 0
+    beam_sampling_params.gpuidx = 0
     pcall(require, 'nn')
 end
 
@@ -40,6 +46,14 @@ local function reset_state(state)
     print('State: ' .. string.format("%s", state.name) .. ' has been reset.')
 end
 
+
+local function errorHandler(err)
+    if string.find(err, 'unknown Torch class <torch.CudaTensor>') and beam_sampling_params.gpuidx == 0 then
+	print("You cannot sample from a model that has been trained on the GPU without cunn and cutorch.")
+    else
+	print(err)
+    end
+end
 
 local function main()
     local checkpoint = torch.load(beam_sampling_params.checkpoint)
@@ -227,4 +241,4 @@ local function main()
     summaries_file:close()    
 end
 
-main()
+xpcall(main, errorHandler)

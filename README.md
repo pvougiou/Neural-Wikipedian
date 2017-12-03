@@ -205,7 +205,7 @@ The table below presents the distribution of the 10 most common predicates, and 
 </table>
 
 ## Our Systems
-The `Systems` directory contains all the code to both train and generate summaries for the sets of triples that are located in the validation and test sets of our datasets. It contains our two models in two separate sub-folders (i.e. `Triples2GRU` and `Triples2LSTM`). The neural network models are implemented using the [Torch](http://torch.ch/). We conducted our experiments on a single Titan X (Pascal) GPU. Please make sure that Torch along with the [torch-hdf5](https://github.com/deepmind/torch-hdf5) package and the NVIDIA CUDA drivers are installed in your machine before executing any of the `.lua` files in these directories.
+The `Systems` directory contains all the code to both train and generate summaries for the sets of triples that are located in the validation and test sets of our datasets. It contains our two models in two separate sub-folders (i.e. `Triples2GRU` and `Triples2LSTM`). The neural network models are implemented using the [Torch](http://torch.ch/) package. We conducted our experiments on a single Titan X (Pascal) GPU. Please make sure that Torch along with the [torch-hdf5](https://github.com/deepmind/torch-hdf5) package and the NVIDIA CUDA drivers are installed in your machine before executing any of the `.lua` files in these directories.
 
 * You can train your own Triples2LSTM or Triples2GRU models, by executing `th train.lua` inside each system's directory. You need to have access to a GPU with at least 11 GB of memory in order to train the models with the same hyperparameters that we used in the paper. However, by lowering the `params.batch_size` and `params.rnn_size` variables you can train on NVIDIA GPUs will less amount of dedicated memory. By altering the `dataset_path` and `checkpoint_path` variables in each `train.lua` file, you can select the dataset (i.e. D1 or D2) on which you will be training your model, and whether you will using the surface form tuples or URIs setup. The checkpoint files of the trained models will be saved in the corresponding `checkpoints` directory.
 
@@ -213,7 +213,11 @@ The `Systems` directory contains all the code to both train and generate summari
  * `Systems/Triples2LSTM/download_trained_models.sh`
  * `Systems/Triples2GRU/download_trained_models.sh`
 
- The generated summaries will be saved as HDF5 files in the directory of the pre-trained model.
+ The generated summaries will be saved as HDF5 files in the directory of the pre-trained model. Our trained models use CUDA Tensors. Consequently, the NVIDIA CUDA drivers along with the `cutorch` and `cunn` Lua packages should be installed in your machine. The latter can be installed by running:
+  ```sh
+  luarocks install cutorch
+  luarocks install cunn
+  ```
 
 * Execute the Python script `beam-sample.py` in order to create a `.csv` file with the sampled summaries. The following Python packages: (i) `h5py`, (ii) `pandas`, and (iii) `numpy` should be installed in your machine. The script replaces the `<item>` tokens along with the property-type placeholders, and presents the generated summaries along with the input sets of triples and the actual Wikipedia summaries in the resultant `.csv` file. The `.csv` file will by default be saved in the location of the pre-trained model.
 
