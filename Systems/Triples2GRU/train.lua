@@ -169,6 +169,10 @@ local function setup(model)
 	    end
 	end
     end
+
+    for j = 0, params.timesteps do
+        decoder.pred[j] = transfer_to_gpu(torch.zeros(params.batch_size, params.target_vocab_size), params.gpuidx)
+    end
     
     if params.layers == 1 then
 	decoder.ds = transfer_to_gpu(torch.zeros(params.batch_size, params.rnn_size), params.gpuidx)	
