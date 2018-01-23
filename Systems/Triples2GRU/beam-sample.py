@@ -146,8 +146,8 @@ for batchidx in range(0, len(summaries['triples'])):
         output['Main-Item'].append(mainItem)
 
         triples = ''
-        for tr in range(0, len(splitDataset['test']['triples'][splitDatasetIndex])):
-            triples += splitDataset['test']['triples'][splitDatasetIndex][tr].replace('<item>', mainItem).decode('utf-8') + '\n'
+        for tr in range(0, len(splitDataset[params['state']]['triples'][splitDatasetIndex])):
+            triples += splitDataset[params['state']]['triples'][splitDatasetIndex][tr].replace('<item>', mainItem).decode('utf-8') + '\n'
         output['Triples'].append(triples)
 
         output['Actual-Summary'].append(splitDataset[params['state']]['actual_target'][splitDatasetIndex])
