@@ -4,7 +4,7 @@
 ----
 ----  Sampled summaries will be saved as HDF5 files in the directory of the pre-trained model.
 ----  For example: sampling summaries with surface form tuples with a beam size of 3 for the triples in the test set of D2
-----  will create the following file: "./checkpoints/D2/surf_form_tuples.model.t7.summaries_Testing.beam_3.h5".
+----  will create the following file: "./checkpoints/D2/surf_form_tuples.model.t7.batch_size_85.beam_size_3.summaries_Testing.h5".
 ----
 ----  IMPORTANT: Make sure that the pre-trained model (i.e. D1 or D2, with-URIs or with-Surface-Form-Tuples) matches the dataset that
 ----  will be loaded in the beam_sampling_params.dataset_path variable.
@@ -71,23 +71,27 @@ local function main()
     local summaries_dictionary = dataset.summaries_dictionary()
     assert(length(triples_dictionary['item2id']) == length(triples_dictionary['id2item']))
     assert(length(summaries_dictionary['word2id']) == length(summaries_dictionary['id2word']))
+    params.num_aligned_triples = triples_dictionary['max_num_triples']
+    params.source_vocab_size = length(triples_dictionary['item2id']) - 1
+    params.target_vocab_size = length(summaries_dictionary['word2id']) - 1
+
     local start_token = summaries_dictionary['word2id']['<start>']
     local end_token = summaries_dictionary['word2id']['<end>']
     local pad_token = summaries_dictionary['word2id']['<PAD>']
 
-
+    
     training = {
-	triples = transfer_to_gpu(dataset.train_triples(params.numAlignedTriples, params.batch_size), params.gpuidx),
+	triples = transfer_to_gpu(dataset.train_triples(params.num_aligned_triples, params.batch_size), params.gpuidx),
 	summaries = transfer_to_gpu(dataset.train_summaries(params.batch_size), params.gpuidx),
 	name = 'Training'
     }
     validation = {
-	triples = transfer_to_gpu(dataset.validate_triples(params.numAlignedTriples, params.batch_size), params.gpuidx),
+	triples = transfer_to_gpu(dataset.validate_triples(params.num_aligned_triples, params.batch_size), params.gpuidx),
 	summaries = transfer_to_gpu(dataset.validate_summaries(params.batch_size), params.gpuidx),
 	name = 'Validation'
     }
     testing = {
-	triples = transfer_to_gpu(dataset.test_triples(params.numAlignedTriples, params.batch_size), params.gpuidx),
+	triples = transfer_to_gpu(dataset.test_triples(params.num_aligned_triples, params.batch_size), params.gpuidx),
 	summaries = transfer_to_gpu(dataset.test_summaries(params.batch_size), params.gpuidx),
 	name = 'Testing'
     }
@@ -101,14 +105,16 @@ local function main()
     -- Set the state from which we'd like to start sampling.
     local state = testing
 
-    next_word = transfer_to_gpu(torch.zeros(params.batch_size), params.gpuidx)
-    LogSoftMax = transfer_to_gpu(torch.zeros(params.batch_size, params.target_vocab_size * params.beam_size), params.gpuidx)
+
 
     encoder.network:evaluate()
     for j = 1, #decoder.rnns do decoder.rnns[j]:evaluate() end
-    
+
+
     decoder.s = {}
     decoder.tempState = {}
+
+
     for j = 0, params.beam_size do
 	decoder.s[j] = {}
 	decoder.tempState[j] = {}
@@ -123,111 +129,162 @@ local function main()
 	end
     end
 
-    local summaries_filename = string.format('%s.summaries_%s.beam_%s.h5', params.checkpoint, state.name, params.beam_size)
-    local summaries_file = hdf5.open(summaries_filename, 'w')
-    summaries = torch.zeros(params.beam_size, params.batch_size * state.triples:size(1), params.timesteps + 1)
 
+    next_word = transfer_to_gpu(torch.zeros(params.batch_size), params.gpuidx)
+    candidates = torch.zeros(params.beam_size, params.batch_size * state.triples:size(1), params.timesteps + 1)
+    beam_probabilities = transfer_to_gpu(torch.zeros(params.batch_size, params.target_vocab_size * params.beam_size), params.gpuidx):fill(-math.huge)
+    summaries = torch.zeros(params.beam_size, params.batch_size * state.triples:size(1), params.timesteps + 1)
+    probabilities = torch.zeros(params.beam_size, params.batch_size * state.triples:size(1)):fill(-math.huge)
     
     while state.batchidx <= state.triples:size(1) do
-	local batchTriples = state.triples[{state.batchidx, {}, {}, {}}]:reshape(params.batch_size * params.numAlignedTriples, 3)
+	local batchTriples = state.triples[{state.batchidx, {}, {}, {}}]:reshape(params.batch_size * params.num_aligned_triples, 3)
+
 	encoder.s = encoder.network:forward(batchTriples)
 	if params.gpuidx > 0 then cutorch.synchronize() end
 	
-	validMask = torch.ones(params.batch_size, params.beam_size)
+	is_beam_active = torch.ByteTensor(params.batch_size, params.beam_size):fill(1)
 	
 	print('Generating summaries for '.. string.format("%d", state.batchidx).. '. Batch...')
 	
 	-- We initialise the decoder.
 	next_word:fill(start_token)
-	summaries:sub(1, params.beam_size, 1, summaries:size(2), 1, 1):fill(start_token)
-	if params.layers == 1 then decoder.s[0]:copy(encoder.s)
+	candidates:sub(1, params.beam_size, 1, candidates:size(2), 1, 1):fill(start_token)
+	if params.layers == 1 then
+	    decoder.s[0]:copy(encoder.s)
 	else
 	    for d = 1, #decoder.s[0] do 
-		if d == 2 then decoder.s[0][2]:copy(encoder.s)
+		if d == 1 then decoder.s[0][1]:copy(encoder.s)
 		else decoder.s[0][d]:zero() end
 	    end
 	end
 	
-	local tempPrediction, tempState = unpack(decoder.rnns[1]:forward({next_word, decoder.s[0]}))
+	local tempPrediction, tempState = unpack(decoder.rnns[1]:forward({next_word,
+									  decoder.s[0]}))
 	
-	for j = 1, params.beam_size do
-	    if params.layers == 1 then decoder.s[j]:copy(tempState)
-	    else copyTable(tempState, decoder.s[j]) end
+	for beamidx = 1, params.beam_size do
+	    if params.layers == 1 then decoder.s[beamidx]:copy(tempState)
+	    else copyTable(tempState, decoder.s[beamidx]) end
 	end
 	if params.gpuidx > 0 then cutorch.synchronize() end
+
 	
-	batchProbabilities, batchIndeces = tempPrediction:topk(params.beam_size, true, true)
 	-- In which case the results are returned from smallest to k-th smallest (dir == false)
 	-- or highest to k-th highest (dir == true).
+	batch_probabilities, batch_indices = tempPrediction:topk(params.beam_size, true, true)
 
-	for i = 2, params.timesteps do    
-	    LogSoftMax:zero()
+
+	for j = 2, params.timesteps do    
+	    beam_probabilities:fill(-math.huge)
 	    for beamidx = 1, params.beam_size do
-		next_word:copy(batchIndeces:sub(1, params.batch_size, beamidx, beamidx))
+		next_word:copy(batch_indices:sub(1, params.batch_size, beamidx, beamidx))
 		
 		
-		local tempPrediction, tempState = unpack(decoder.rnns[i]:forward({next_word, decoder.s[beamidx]}))
+		local tempPrediction, tempState = unpack(decoder.rnns[j]:forward({next_word,
+										  decoder.s[beamidx]}))
 
 		if params.layers == 1 then decoder.tempState[beamidx]:copy(tempState)
 		else copyTable(tempState, decoder.tempState[beamidx]) end
 		if params.gpuidx > 0 then cutorch.synchronize() end
 
-		prediction = tempPrediction + batchProbabilities:sub(1, params.batch_size, beamidx, beamidx)
+		local prediction = tempPrediction + batch_probabilities:sub(1, params.batch_size, beamidx, beamidx)
 		    :reshape(params.batch_size, 1):expand(params.batch_size, params.target_vocab_size)
-		-- Assertion fails due to floating point accuracy; let's hope it's fine for now.
-		-- assert(seqProbabilities[sampleidx][13] * tempPrediction[13][2] == prediction[13][2])
- 
-		LogSoftMax:sub(1, params.batch_size, (beamidx - 1) * params.target_vocab_size + 1, beamidx * params.target_vocab_size):copy(prediction)
+		
+		beam_probabilities:sub(1, params.batch_size, (beamidx - 1) * params.target_vocab_size + 1, beamidx * params.target_vocab_size):copy(prediction)
 	    end
 	    
-	    for j = 1, params.batch_size do
-		for b = 1, params.beam_size do
-		    if validMask[j][s] == 0 then
-			LogSoftMax:sub(j, j, (b - 1) * params.target_vocab_size + 1, b * params.target_vocab_size):fill(-math.huge)
+	    for itemidx_in_batch = 1, params.batch_size do
+		-- This part is computationally too expensive, but it outputs the
+		-- the proper result. Need to fix at a later stage.
+		for beamidx = 1, params.beam_size do
+		    if is_beam_active[itemidx_in_batch][beamidx] == 0 then
+			
+			beam_probabilities:sub(itemidx_in_batch, itemidx_in_batch, (beamidx - 1) * params.target_vocab_size + 1, beamidx * params.target_vocab_size):fill(-math.huge)
 		    end
 		end
 
-		candidates = torch.Tensor(batchIndeces[j]:size()):copy(batchIndeces[j])
+		-- These are the words for which a prediction for their next one
+		-- has been computed.
+		local candidate_words = torch.Tensor(batch_indices[itemidx_in_batch]:size()):copy(batch_indices[itemidx_in_batch])
 
-		tempProbabilities, tempCandidates = LogSoftMax[j]:topk(params.beam_size, true, true)
-		tempMask = torch.Tensor(validMask[j]:size()):copy(validMask[j])
+
+		-- The winning indices of the tokens along in the aggregated dictionary
+		-- that lead to the sequences with the highest probabilities. next_word_probabilities
+		-- contains the probabilities of the resultant sequences up to those predicted tokens
+		-- (i.e. timestep: j + 1).
+		next_word_probabilities, next_word_indices = beam_probabilities[itemidx_in_batch]:topk(params.beam_size, true, true)
+
+		-- This is a deep copy of the is_beam_active mask.
+		local tmp_is_beam_active = torch.ByteTensor(is_beam_active[itemidx_in_batch]:size()):copy(is_beam_active[itemidx_in_batch])
+
+		-- Deep copy of the running candidates just before we set them to zero.
+		local tmp_candidates = torch.Tensor(candidates[{{}, (state.batchidx - 1) * params.batch_size + itemidx_in_batch, {}}]:size())
+:copy(candidates[{{}, (state.batchidx - 1) * params.batch_size + itemidx_in_batch, {}}])
+
+
 		
-		batchProbabilities:sub(j, j, 1, params.beam_size):copy(tempProbabilities)
-		tempSummaries = torch.Tensor(summaries:sub(1, params.beam_size, (state.batchidx - 1) * params.batch_size + j, (state.batchidx - 1) * params.batch_size + j, 1, i - 1):size())
-		    :copy(summaries:sub(1, params.beam_size, (state.batchidx - 1) * params.batch_size + j, (state.batchidx - 1) * params.batch_size + j, 1, i - 1))
-		
+		-- We are setting the candidates of this particular item in the batch (i.e. itemidx_in_batch) to zero.
+		-- We are re-filling it based on the tmp_candidates matrix according to the indices of the most
+		-- probable sequences.
+		candidates[{{1, params.beam_size}, (state.batchidx - 1) * params.batch_size + itemidx_in_batch}]:zero()
+
+
+		local num_active_beams = is_beam_active[itemidx_in_batch]:eq(1):sum()
+		local num_completed_beams = is_beam_active[itemidx_in_batch]:eq(0):sum()
+
 		for beamidx = 1, params.beam_size do
 
-		    if validMask[j][beamidx] == 1 then
-			candidatesIndex = math.floor((tempCandidates[beamidx - validMask[j]:sub(1, beamidx):eq(0):sum()] - 1) / params.target_vocab_size) + 1
+		    if is_beam_active[itemidx_in_batch][beamidx] == 1 then
+				
+			
+			winning_sequence_index = math.floor((next_word_indices[beamidx - is_beam_active[itemidx_in_batch]:sub(1, beamidx):eq(0):sum()] - 1) / params.target_vocab_size) + 1
+			winning_latter_words = next_word_indices[beamidx - is_beam_active[itemidx_in_batch]:sub(1, beamidx):eq(0):sum()] % params.target_vocab_size
+			if winning_latter_words == 0 then winning_latter_words = params.target_vocab_size end
 
 			
-			-- The indexing here is preverted!
-			summaries[beamidx][(state.batchidx - 1) * params.batch_size + j]:sub(1, i - 1):copy(tempSummaries[candidatesIndex])
-			summaries[beamidx][(state.batchidx - 1) * params.batch_size + j][i] = candidates[candidatesIndex]
-			
-			batchIndeces[j][beamidx] = tempCandidates[beamidx - validMask[j]:sub(1, beamidx):eq(0):sum()] % params.target_vocab_size
-			batchProbabilities[j][beamidx] = tempProbabilities[beamidx - validMask[j]:sub(1, beamidx):eq(0):sum()]
-			
-			
+			-- Update the hidden states of the winning beams.
 			if params.layers == 1 then 
-			    decoder.s[beamidx][j]:copy(decoder.tempState[candidatesIndex][j])
+			    decoder.s[beamidx][itemidx_in_batch]:copy(decoder.tempState[winning_sequence_index][itemidx_in_batch])
 			else
 			    for d = 1, params.layers do
-				decoder.s[beamidx][d][j]:copy(decoder.tempState[candidatesIndex][d][j])
+				decoder.s[beamidx][d][itemidx_in_batch]:copy(decoder.tempState[winning_sequence_index][d][itemidx_in_batch])
 			    end
 			end
-			if batchIndeces[j][beamidx] == 0 then			 
-			    summaries[beamidx][(state.batchidx - 1) * params.batch_size + j][i + 1] = end_token
-			    batchProbabilities[j][beamidx] = LogSoftMax[j]:min()
-			    tempMask[beamidx] = 0 
+
+			
+			if winning_latter_words == end_token then
+
+			    tmp_is_beam_active[beamidx] = 0
+			    summaries[tmp_is_beam_active:eq(0):sum()][(state.batchidx - 1) * params.batch_size + itemidx_in_batch]:copy(tmp_candidates[winning_sequence_index])
+			    summaries[tmp_is_beam_active:eq(0):sum()][(state.batchidx - 1) * params.batch_size + itemidx_in_batch][j] = candidate_words[winning_sequence_index]
+			    summaries[tmp_is_beam_active:eq(0):sum()][(state.batchidx - 1) * params.batch_size + itemidx_in_batch][j + 1] = end_token
+			    probabilities[tmp_is_beam_active:eq(0):sum()][(state.batchidx - 1) * params.batch_size + itemidx_in_batch] = next_word_probabilities[beamidx - is_beam_active[itemidx_in_batch]:sub(1, beamidx):eq(0):sum()]
+
+
+			    -- Update batch_indices and batch_probabilities for the
+			    -- prediction of the i + 1 word.
+			    batch_indices[itemidx_in_batch][beamidx] = 0
+			    batch_probabilities[itemidx_in_batch][beamidx] = -math.huge			    
+			else
+			
+			    -- The indexing is preverted here as well!
+			    candidates[beamidx][(state.batchidx - 1) * params.batch_size + itemidx_in_batch]:copy(tmp_candidates[winning_sequence_index])
+			    candidates[beamidx][(state.batchidx - 1) * params.batch_size + itemidx_in_batch][j] = candidate_words[winning_sequence_index]
+
+
+			    -- Update batch_indices and batch_probabilities for the
+			    -- prediction of the i + 1 word. batch_indices are used as an input to the neural
+			    -- network for the prediction of the word at j + 1.
+			    batch_indices[itemidx_in_batch][beamidx] = winning_latter_words
+			    batch_probabilities[itemidx_in_batch][beamidx] = next_word_probabilities[beamidx - is_beam_active[itemidx_in_batch]:sub(1, beamidx):eq(0):sum()]
 			end
+
+
 		    else
-			batchIndeces[j][beamidx] = 0
-			batchProbabilities[j][beamidx] = LogSoftMax[j][(beamidx - 1) * params.target_vocab_size + 1]
+			batch_indices[itemidx_in_batch][beamidx] = 0
+			batch_probabilities[itemidx_in_batch][beamidx] = -math.huge
 		    end
 		end
-		validMask[j]:copy(tempMask)
+		is_beam_active[itemidx_in_batch]:copy(tmp_is_beam_active)
 	    end
 	end
     
@@ -235,10 +292,34 @@ local function main()
 	collectgarbage()
 	collectgarbage()
     end
+
+
+    -- Creating the HDF5 file that will be used in order to store
+    -- the generated summaries.
+    local summaries_filename = string.format('%s.batch_size_%d.beam_size_%d.summaries_%s.h5', params.checkpoint, params.batch_size, params.beam_size, state.name)
+    -- Previous format of storing the summary.
+    -- local summaries_filename = string.format('%s.summaries_%s.beam_%s.h5', params.checkpoint, state.name, params.beam_size)
+    local summaries_file = hdf5.open(summaries_filename, 'w')
+
+    
     summaries_file:write(tostring('triples'), state.triples:int())
     summaries_file:write(tostring('summaries'), summaries)
+    summaries_file:write(tostring('probabilities'), probabilities)
     summaries_file:write(tostring('actual_summaries'), state.summaries:int())
     summaries_file:close()    
 end
 
 xpcall(main, errorHandler)
+
+
+
+
+
+
+
+
+
+
+
+
+    
